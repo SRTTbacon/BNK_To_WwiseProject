@@ -1,0 +1,188 @@
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+
+namespace BNKManager
+{
+    public abstract class LoLSoundBank
+    {
+        public string fileLocation;
+        public abstract void Save();
+        public abstract void Save(string fileLocation);
+        public LoLSoundBank(string fileLocation)
+        {
+            this.fileLocation = fileLocation;
+        }
+    }
+    public class LoLSoundBankManager
+    {
+        public List<LoLSoundBank> banksList = null;
+        public LoLSoundBankManager(List<LoLSoundBank> banksList)
+        {
+            this.banksList = banksList;
+        }
+        public WPKSoundBank GetWPKBank()
+        {
+            return (WPKSoundBank)banksList.Find(x => x is WPKSoundBank);
+        }
+        public BankSection GetSection(string sectionName)
+        {
+            BankSection found = null;
+            foreach (LoLSoundBank bank in banksList)
+            {
+                if (bank is WwiseBank bank1)
+                {
+                    found = bank1.GetSection(sectionName);
+                    if (found != null)
+                        return found;
+                }
+            }
+            return found;
+        }
+        public LoLSoundBank GetBank(uint bankId)
+        {
+            return banksList.Find(x => (x is WwiseBank bank) && (bank.GetID() == bankId));
+        }
+        //.bnk内のwemファイルをbyte[]で取得
+        public byte[] GetFileData(uint fileID)
+        {
+            DATASection data = (DATASection)GetSection("DATA");
+            if (data != null)
+                for (int i = 0; i < data.wemFiles.Count; i++)
+                    if (data.wemFiles[i].info.ID == fileID)
+                        return data.wemFiles[i].data;
+            WPKSoundBank wpkBank = GetWPKBank();
+            if (wpkBank != null)
+                foreach (WPKSoundBank.WPKSoundBankWEMFile wemFile in wpkBank.wemFiles)
+                    if (wemFile.ID == fileID)
+                        return wemFile.data;
+            return null;
+        }
+        //.bnk内のサウンド一覧を取得
+        public List<WEMFile> GetAudioFiles()
+        {
+            List<WEMFile> newList = new List<WEMFile>();
+            DIDXSection dataIndex = (DIDXSection)GetSection("DIDX");
+            DATASection data = (DATASection)GetSection("DATA");
+            //HIRCSection hirc = (HIRCSection)GetSection("HIRC");
+            if (dataIndex != null && data != null)
+            {
+                foreach (DATASection.WEMFile wem in data.wemFiles)
+                {
+                    //一部の破損したbnkファイルを読み込もうとした場合クラッシュするためtry catchを使用(どぉーしてだよ"ぉ～)
+                    //RavioliGameToolsで確認したところ、サウンド以外の謎のファイルが入っている場合にエラーが発生する可能性が高い
+                    try
+                    {
+                        newList.Add(new WEMFile(wem.info.ID, 0, GetAudioFileSeconds(ref wem.data)));
+                    }
+                    catch { }
+                }
+            }
+            WPKSoundBank wpkBank = GetWPKBank();
+            if (wpkBank != null)
+                foreach (WPKSoundBank.WPKSoundBankWEMFile wem in wpkBank.wemFiles)
+                    newList.Add(new WEMFile(wem.ID, 0, GetAudioFileSeconds(ref wem.data)));
+            //本家WoT内の音声ファイルを選択するとクラッシュしてしまうため廃止
+            /*if (hirc != null)
+            {
+                foreach (WEMFile wem in newList)
+                {
+                    SoundSFXVoiceWwiseObject foundSfx = (SoundSFXVoiceWwiseObject)hirc.objects.Find(x => x.objectType == WwiseObjectType.Sound_SFX__Sound_Voice && ((SoundSFXVoiceWwiseObject)x).audioFileID == wem.ID);
+                    if (foundSfx != null)
+                    {
+                        EventActionWwiseObject foundEventAction = (EventActionWwiseObject)hirc.objects.Find(x => x.objectType == WwiseObjectType.Event_Action && ((EventActionWwiseObject)x).gameObject == foundSfx.ID);
+                        if (foundEventAction != null)
+                        {
+                            EventWwiseObject foundEvent = (EventWwiseObject)hirc.objects.Find(x => x.objectType == WwiseObjectType.Event && ((EventWwiseObject)x).eventActionList.Contains(foundEventAction.ID));
+                            if (foundEvent != null)
+                            {
+                                wem.eventID = foundEvent.ID;
+                            }
+                        }
+                    }
+                }
+            }*/
+            return newList;
+        }
+        //.bnk内の指定したサウンドの長さを取得(単位:秒)
+        public static int GetAudioFileSeconds(ref byte[] data)
+        {
+            int result = 0;
+            using (BinaryReader br = new BinaryReader(new MemoryStream(data)))
+            {
+                _ = br.BaseStream.Seek(4, SeekOrigin.Begin);
+                float fileSize = br.ReadUInt32();
+                _ = br.BaseStream.Seek(28, SeekOrigin.Begin);
+                float bytesPerSecond = br.ReadUInt32();
+                float seconds = fileSize / bytesPerSecond;
+                result = (int)Math.Round(seconds);
+            }
+            return result;
+        }
+        //.bnk内のwemファイルを差し替える
+        public void EditAudioFile(uint fileID, byte[] newData)
+        {
+            DIDXSection dataIndex = (DIDXSection)GetSection("DIDX");
+            DATASection data = (DATASection)GetSection("DATA");
+            if (dataIndex != null && data != null)
+            {
+                uint lastOffset = 0;
+                for (int i = 0; i < dataIndex.embeddedWEMFiles.Count; i++)
+                {
+                    dataIndex.embeddedWEMFiles[i].offset = lastOffset;
+                    if (dataIndex.embeddedWEMFiles[i].ID == fileID)
+                        dataIndex.embeddedWEMFiles[i].length = (uint)newData.Length;
+                    lastOffset += dataIndex.embeddedWEMFiles[i].length + 10;
+                }
+                for (int i = 0; i < data.wemFiles.Count; i++)
+                    if (data.wemFiles[i].info.ID == fileID)
+                        data.wemFiles[i].data = newData;
+                HIRCSection hirc = (HIRCSection)GetSection("HIRC");
+                if (hirc != null)
+                {
+                    foreach (WwiseObject obj in hirc.objects)
+                    {
+                        if (obj.objectType == WwiseObjectType.Sound_SFX__Sound_Voice)
+                        {
+                            SoundSFXVoiceWwiseObject soundObj = (SoundSFXVoiceWwiseObject)obj;
+                            DIDXSection.EmbeddedWEM gotEmbedded = dataIndex.GetEmbeddedWEM(soundObj.audioFileID);
+                            if (gotEmbedded != null)
+                            {
+                                soundObj.fileOffset = (uint)data.dataStartOffset + gotEmbedded.offset;
+                                soundObj.fileLength = gotEmbedded.length;
+                            }
+                        }
+                    }
+                }
+            }
+            WPKSoundBank wpkBank = GetWPKBank();
+            if (wpkBank != null)
+                foreach (WPKSoundBank.WPKSoundBankWEMFile wemFile in wpkBank.wemFiles)
+                    if (wemFile.ID == fileID)
+                        wemFile.data = newData;
+        }
+        //差し替えたwemファイルを反映
+        public void Save()
+        {
+            foreach (LoLSoundBank bank in banksList)
+                bank.Save();
+        }
+        public void Save(string To_File)
+        {
+            foreach (LoLSoundBank bank in banksList)
+                bank.Save(To_File);
+        }
+        public class WEMFile
+        {
+            public uint ID;
+            public uint eventID;
+            public int seconds;
+            public WEMFile(uint ID, uint eventID, int seconds)
+            {
+                this.eventID = eventID;
+                this.ID = ID;
+                this.seconds = seconds;
+            }
+        }
+    }
+}
